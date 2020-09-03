@@ -1,0 +1,12 @@
+useDynLib(CTR, .registration = TRUE)
+export(CTR)
+
+import(DiagrammeR)
+importFrom("graphics", "axis", "lines", "plot")
+importFrom("stats", "coef")
+
+S3method(summary, CTR)
+S3method(plot, CTR)
+S3method(coef, CTR)
+S3method(predict, CTR)
+S3method(print, CTR)

@@ -1,0 +1,17 @@
+Package: CTR
+Type: Package
+Title: Coefficient Tree Regression (CTR)
+Version: 0.1.0
+Author: Ozge Surer
+Maintainer: The package maintainer <ozgesurer2019@u.northwestern.edu>
+Description: Implementation of an algorithm to discover the unknown group structure and fit the resulting regression model.
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+Depends: 
+    DiagrammeR
+Suggests: 
+    knitr,
+    rmarkdown
+VignetteBuilder: knitr
+RoxygenNote: 6.1.1

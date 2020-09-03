@@ -1,0 +1,222 @@
+---
+title: "CTR Vignette"
+author: "Ozge Surer, Daniel Apley and Edward Malthouse"
+date: "`r Sys.Date()`"
+output: 
+  rmarkdown::html_vignette:
+    toc: true
+vignette: >
+  %\VignetteIndexEntry{CTR Vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+# Introduction
+
+The proliferation of data collection technologies commonly results in datasets of immense size with a large number of predictors. In practice, many groups of predictors often share a common regression coefficient (i.e., the predictors in the group affect the response only via their collective sum), where the groups are unknown in advance and must be discovered from the data. Surer et. al. (2019) proposes an algorithm called coefficient tree regression (CTR) to discover the unknown group structure and fit the resulting regression model. Discovering unknown group structure automatically from the data is fundamentally important since the group structure leads to simple, parsimonious and interpretable models. This vignette describes the usage of CTR in R. See the Surer et. al. (2019) reference paper listed below for details. 
+
+We consider the standard linear regression model with $n$ observations and $p$ predictors having response observations $y_1, y_2, \ldots, y_n$ and predictor observations $x_{i, j}$, $i = 1, 2, \ldots, n$, $j = 1, 2, \ldots, p$:
+\[
+\mathbf{y} = \beta_{1} \mathbf{x}_1 + \beta_{2} \mathbf{x}_{2} + \cdots + \beta_{p} \mathbf{x}_{p} + \boldsymbol{\epsilon},
+\]
+where $\mathbf{y} = \big[y_1, y_2, \ldots, y_n\big]^\mathsf{T}$, $\mathbf{x}_j = \big[x_{1,j}, x_{2,j}, \ldots, x_{n,j}\big]^\mathsf{T}$ and $\boldsymbol{\epsilon} \sim \mathrm{N}(\mathbf{0}, \sigma^2 \mathbf{I})$ are $n$ dimensional vectors of the response observations, the predictor observations, and the noise, respectively, and each $\beta_j$ is a regression coefficient. 
+
+If the predictors within a group share a common coefficient, this is equivalent to the group of predictors impacting the response only via a single derived predictor that is the sum of the predictors in the group. In other words, letting $G_i$ denote the set of indices in the $i$th group (for $i = 1, 2, \ldots, k$, where $k$ is the number of distinct groups), and considering the derived predictor $\mathbf{z}_i = \sum\limits_{j \in G_i} \mathbf{x}_j$, the linear regression model described above can be written as 
+\[
+\mathbf{y} = \alpha_{1} \mathbf{z}_1 + \alpha_{2} \mathbf{z}_{2} + \cdots + \alpha_{k} \mathbf{z}_{k} + \boldsymbol{\epsilon}. \]
+Each $\alpha_i$ represents the common regression coefficient shared by all predictors in group $i$. 
+
+`CTR` package finds the groups by recursively splitting the predictors into sets that have similar coefficients. Iterative nature of the `CTR` results in a highly-interpretable tree structure representing the groups of predictors and their associated coefficients (the final group structure, as well as the sequence of splits that produced the group structure, which contains information on higher-level group structures). 
+
+The package also makes use computational features of both linear regression (fast model updating when adding/modifying a predictor in the model) and regression trees (fast forming and splitting the groups of predictors). Due to highly efficient updates and techniques such as warm starts and heuristic search procedure, `CTR` can explore the group structure very fast. The core of `CTR` package is a set of highly optimized linear algebra subroutines, which make for very fast execution.
+
+The package also includes methods for prediction, plotting and visualizing the tree structure, and methods that perform $K$-fold cross-validation (CV) and warm-start strategy that will be described.
+
+# Installation
+
+```{r}
+library(CTR)
+```
+
+# Coefficient Tree Regression (CTR)
+
+## Description
+
+`CTR` sequentially adds derived predictors (the sum of predictors in groups) to the model. After each iteration $k$, the number of derived predictors in the model is $k$. This process continues until we obtain a final set of derived predictors satisfying the termination criterion. Users might pick a value `Kmax` up front for the total number of derived predictors in the fitted CTR model at termination. Alternatively, the best model size (i.e., the best value of the number of derived predictors in the final model) can be chosen using $K$-fold cross validation (CV). Users may change the `cv` option depending on their preferences. If CV is used, a user must select `Kmax` as the upper bound on the best model size. The default is `Kmax = 20`. However, in some cases a better model might be obtained with `Kmax > 20`. In this case, the warm-start feature allows users to input the existing `CTR` object to the continuation of the CTR.
+
+## Usage
+
+`CTR(X, y, Kmax = 5, cv = 0, warm.start = NULL)`
+
+## Arguments
+
+Input | Definition |
+|------|----------------------------------------------------------------|
+`X`    | The $n \times p$ design matrix of predictor observations to which the CTR is fit. |
+`y`    | The $n$ dimensional vector of the response observations. |
+`Kmax` | A numeric scalar that specifies the upper bound on the best model size. If `cv = 0`, it specifies the model size at termination. |
+`cv`   | A numeric scalar that specifies the number of folds used in $K$-fold CV. If `cv = 0`, the argument allows users to fit the CTR model with `Kmax` derived predictors at termination without using CV. |
+`warm.start` | If `NULL`, start fitting CTR model from scratch. Otherwise, input object of class `CTR` for the use of warm-start strategy. |
+
+## Example (without CV)
+
+We generate a dataset with $p = 50$ and $n = 5,000$, where $\mathbf{X}$ is the $n \times p$ design matrix of predictor observations and $\mathbf{y}$ is the $n$ dimensional vector of the response observations. We use this dataset throughout the vignette:
+
+```{r}
+#Generate some data
+set.seed(1122)
+p <- 50
+n <- 5000
+X <- matrix(rnorm(n * p), nrow = n)
+beta <- c(rep(-2, 10), -rev(seq(10,19))/10, rep(0, 10), seq(10,19)/10, rep(2, 10))
+sigmasq <- ((1/0.9) - 1)*(t(beta)%*%cov(X)%*%beta)
+y <- X %*% beta + rnorm(n, mean = 0, sd = sqrt(sigmasq))
+```
+
+We first illustrate the usage of the most basic call to `CTR` without using CV. As mentioned above `CTR` requires a termination criterion that represents the number of derived predictors in the model at termination. The best model size can be obtained via $K$-fold CV. However, in some situations, users might want to obtain only the prespecified number of derived predictors instead of finding the best model size via CV. 
+
+As mentioned above, CTR iteratively identifies the unknown groups each of which is a set of indices of predictors that defines one derived predictor $\mathbf{z}_i$ in the CTR model. If $k$ groups are predefined at termination, then $G_{1} \cup G_{2} \cup \cdots \cup G_{k}$ denotes the indices of all predictors in all groups in the model after iteration $k$. In order to observe the variable selection procedure, let $G_{k+1}$ denote the excluded group of predictors (which is equivalent to group $G_{k+1}$ having a coefficient of zero). Therefore, after iteration $k$ at termination, we have $k+1$ disjoint groups. `CTR` uses the settings `cv = 0` (CV is not allowed) and `Kmax = k` to denote the total number of derived predictors in the final fitted `CTR` model. 
+
+In this example, we set `cv = 0` and `Kmax = 6` assuming that we can obtain an interpretable and accurate model with 6 derived predictors at termination.  
+
+```{r}
+#Fit CTR model
+CTR.fit <- CTR(X, y, Kmax = 6, cv = 0, warm.start = NULL)
+```
+
+`CTR.fit` is an object of class `CTR` that contains all the relevant information of the fitted model for further use. Various methods are provided for the object such as `summary`, `coef`, `predict` and `print` that enable users to execute those tasks.
+
+
+After fitting the CTR model, we can summarize the fitted `CTR` object as follows:
+
+```{r}
+#Summarize the fitted CTR model
+summary(CTR.fit)
+```
+
+A user can use the method `summary` to print the sample size ($n$), the number of predictors ($p$), the number of derived predictors at termination ($k$) and the number of predictors included in the final CTR group structure. Moreover, it displays some details for each group in the final model such as the number of predictors (size), the estimated group coefficient ($\alpha$) and the indices of the predictors (predictor ids) included in each group $G_i$ $\forall i = 1, \ldots, k+1$.
+
+Returning to our example, since we have the setting `Kmax = 6, cv = 0`, CTR identifies 6 nonzero-coefficient groups with the final training $R^2 = 0.896$. In the final group structure, 40 predictors out of 50 predictors are included in the 6 groups such that the groups are $\{31, \ldots, 33\}$, $\{34, \ldots, 37\}$, $\{38, \ldots, 50\}$, $\{14, \ldots, 17\}$, $\{18, \ldots, 20\}$ and $\{1, \ldots, 13\}$. The remaning 10 predictors are therefore included in the zero-coefficient group $\{21, \ldots, 30\}$.
+
+We then extract the estimated common regression coefficients for each group $G_i$ in the final CTR model via `coef`. 
+
+```{r}
+#Extract the estimated coefficients of the derived predictors
+coef(CTR.fit)$alpha
+```
+
+In the example, since we have 6 disjoint groups of predictors with nonzero coefficients at termination, CTR outputs 6 estimated group coefficients along with the intercept. Note that the number of estimated coefficients decreases from 50 in the original regression model to 6 in the CTR model. In this sense, CTR encourages parsimonious models by grouping the predictors with nonzero coefficients.
+
+We can also extract the estimated standard regression coefficients using the estimated group coefficients. The estimated standard regression coefficients for the predictors in group $G_i$ are the same as the estimated group coefficient of group $G_i$.
+
+In our example, recall that the first group includes 3 predictors $\mathbf{x}_{31}, \ldots, \mathbf{x}_{33}$, and the estimated coefficient of the corresponding derived predictor $\mathbf{z}_1$ (i.e., $\mathbf{z}_1 = \mathbf{x}_{31} + \cdots + \mathbf{x}_{33}$) is $1.05$. Therefore, the estimated standard coefficient of each of $\mathbf{x}_{33}, \ldots, \mathbf{x}_{35}$ is $1.05$. 
+
+```{r}
+#Extract the estimated standard regression coefficients
+coef(CTR.fit)$beta
+```
+
+Predictions can be made based on the fitted `CTR` object. `newdata` is for the new input matrix.
+
+```{r}
+#Predict
+predict(CTR.fit, newdata = X[1:5,])
+```
+
+As mentioned above `CTR` results in a highly-interpretable tree structure representing the sequence of group structures produced after each iteration. `CTR` grows the tree by splitting one of the groups in the set at the current iteration $k$ into two. After iteration $k$, we have $k+1$ disjoint groups. The existing groups that were not split are carried to the next iteration without modification. Thus, the number of groups increases by one during each iteration. The hierarchical nature of the CTR provides insight into the importance of the predictors, their higher-level grouping structures, and how they relate to each other. `print` displays a visual representation of the fitted `CTR` object as follows:
+
+```{r}
+#Print the tree
+print(CTR.fit, option = "text")
+```
+
+```{r, , fig.width=7, fig.height=7}
+#Print the tree
+print(CTR.fit, option = "tree")
+```
+
+For each group structure produced at the end of each iteration, `print` with an option `text` outputs the estimated group coefficients ($\alpha$) and the indices of the predictors (predictor ids) included in each group. Groups are printed using two indices such that the first index corresponds to the iteration number $k$ and the second index represents the group index $i$ at the current iteration. 
+
+Returning back to our example, for initialization, since `CTR` has not identified any derived predictor yet, we have only the single group $G_{0,1}$, which contains all predictors (i.e., $G_{0,1} = \{1, \ldots, 50\}$) and assigns them a common coefficient of zero. During iteration $k = 1$, CTR splits the initial group $G_{0,1}$ into two groups $G_{1,1}$ and $G_{1,2}$, where $G_{1,1} = \{31, \ldots, 50\}$ with a group coefficient of $1.68$, and $G_{1,2} = \{1, \ldots, 30\}$ with a coefficient of $0$ (i.e., $G_{1,2}$ is the excluded group of predictors). 
+
+During iteration $k = 2$, `CTR` finds a new group of predictors by splitting the zero-coefficient group $G_{1,2}$ into a nonzero-coefficient group $G_{2,2} = \{1, \ldots, 20\}$ with a non-zero coefficient $-1.70$ and a zero-coefficient group $G_{2,3} = \{21, \ldots, 30\}$. The remaining group $G_{1,1}$ stays the same, i.e., $G_{1,1} = G_{2,1} = \{31, \ldots, 50\}$ with an updated coefficient $1.70$. Thus, at this point of the `CTR`, the predictors can roughly be divided into a group of predictors with negative coefficients ($\mathbf{x}_1, \ldots, \mathbf{x}_{20}$) and a group with positive coefficients ($\mathbf{x}_{31}, \ldots, \mathbf{x}_{50}$).
+
+Within an existing group of predictors, if some are more or less influential compared to the others in this group, `CTR` can split them into separate subgroups at subsequent iterations to properly adjust their coefficients. In the example, this type of split occurs during the rest of the iterations $k = 3, 4, 5, 6$. For example, during iteration $k = 3$, $G_{2,1}$ is split into two nonzero coefficient groups $G_{3,1} = \{31, \ldots, 37\}$ and $G_{3,2} = \{38, \ldots, 50\}$ with coefficients of $1.27$ and $1.94$. The remaning groups stay the same, i.e., $G_{2,2} = G_{3,3} = \{1, \ldots, 20\}$ and $G_{2,3} = G_{3,4} = \{21, \ldots, 30\}$ with updated coefficients $-1.71$ and $0$. 
+
+After iteration $k = 6$, `CTR` terminated with the final group structure. The groups in the model are $G_{6,1} = \{31, \ldots, 33\}$, $G_{6,2} = \{34, \ldots, 37\}$, $G_{6,3} = \{38, \ldots, 50\}$, $G_{6,4} = \{14, \ldots, 17\}$, $G_{6,5} = \{18, \ldots, 20\}$ and $G_{6,6} = \{1, \ldots, 13\}$, with coefficients of $1.05$, $1.44$, $1.95$, $-1.41$, $-1.13$, $-1.95$, and the excluded group is $G_{6,7} = \{21, \ldots, 30\}$.
+
+As mentioned at a higher level the predictors can roughly be divided into a group of predictors with negative coefficients ($\mathbf{x}_1, \ldots, \mathbf{x}_{20}$) and a group with positive coefficients ($\mathbf{x}_{31}, \ldots, \mathbf{x}_{50}$). Among positive coefficient predictors, the predictors $\mathbf{x}_{38}, \ldots, \mathbf{x}_{50}$ are the most influential ones (i.e., $G_{6,3} = \{38, \ldots, 50\}$ with a coefficient of $1.95$), whereas the predictors $\mathbf{x}_{31}, \ldots, \mathbf{x}_{33}$ are the least influential ones (i.e., $G_{6,1} = \{31, \ldots, 33\}$ with a coefficient of $1.05$). Among negative coefficient predictors, the predictors $\mathbf{x}_{1}, \ldots, \mathbf{x}_{13}$ are the most influential ones (i.e., $G_{6,6} = \{1, \ldots, 13\}$ with a coefficient of $-1.95$), whereas the predictors $\mathbf{x}_{18}, \ldots, \mathbf{x}_{20}$ are the least influential ones (i.e., $G_{6,5} = \{18, \ldots, 20\}$ with a coefficient of $-1.13$). The estimated coefficients are close to the true coefficients since the dataset is generated based on the linear model 
+\[\mathbf{y} = \beta_{1} \mathbf{x}_1 + \beta_{2} \mathbf{x}_{2} + \cdots + \beta_{p} \mathbf{x}_{p} + \boldsymbol{\epsilon},\] where $\beta_1 = \cdots = \beta_{10} = -2$, $\beta_j = -\bigg(\frac{j - 1}{10}\bigg) \text{ for } j = 11, \ldots, 20$, $\beta_{21} = \cdots = \beta_{30} = 0$, $\beta_j = \frac{j - 1}{10} - 2 \text{ for } j = 31, \ldots, 40$, and $\beta_{41} = \cdots = \beta_{50} = 2$.
+
+# Coefficient Tree Regression with Cross-Validation
+
+## Description
+
+`CTR` requires a termination criterion to determine the number of derived predictors in the model at termination. Note that the model size is the only tuning parameter for CTR, and this can be chosen using $K$-fold CV. If `cv > 1`, the package performs $K$-fold CV, where $K$ = `cv`, to find the best model size, and then fits the final `CTR` model of this chosen size using all the data. In CV, a user must select an upper bound `Kmax` on the best model size. We recommend using $k_{max} = 20$ for the reasons that we discuss in Section 5 in the Surer et. al. (2019) reference paper listed below.
+
+## Usage
+
+`CTR(X, y, Kmax = 20, cv = 10, warm.start = NULL)`
+
+## Example (with CV)
+
+We still act on the sample data loaded before. In this example, we set `cv = 10` to perform 10-fold CV. We use `Kmax = 20` as an upper bound on the total number of derived predictors at termination. 
+
+```{r}
+#Fit CTR model via CV
+set.seed(1234)
+cvCTR.fit <- CTR(X, y, Kmax = 20, cv = 10, warm.start = NULL)
+```
+
+`cvCTR.fit` is an object of class `CTR` that contains all the relevant information of the fitted model for further use. It also contains the fitted models of size $k = 1, 2, \ldots, 20$, the CV SSE values for each size model, the CV partition indices in case a user prefers to apply a warm-start strategy, which is described in the next section, as a further step. In addition to various methods provided for the object such as `summary`, `coef`, `predict` and `print`, a user can use `plot` to visualize the CV relative error (CV SSE/SST) versus the number of derived predictors in the model.
+
+
+```{r, fig.width = 8}
+#Summarize the fitted CTR model
+summary(cvCTR.fit)
+```
+
+
+We can plot the CV relative error versus the number of derived predictors in the model.
+
+```{r, fig.width = 8}
+#Plot CTR CV relative error
+plot(cvCTR.fit)
+```
+
+
+# Coefficient Tree Regression with Warm-Start Strategy
+
+## Description
+
+A user must select `Kmax`. In general, `Kmax = 20` is sufficient. See Section 5 in the Surer et. al. (2019) reference paper listed below for details. However, in some cases a better model might be obtained with `Kmax > 20`. In this case, one should increase `Kmax` to a larger value (i.e., `Kmax = 40`) and compare the CV SSE of the larger fitted models. After increasing `Kmax` in this manner, instead of running the CTR algorithm and CV from scratch, one can use a warm-start strategy in which the `CTR` object for the initial `Kmax` are given as input to `warm.start`.
+
+## Usage
+
+`CTR(X, y, Kmax = 40, cv = 10, warm.start = cvCTR.fit)`
+
+## Example (with CV and warm-start strategy)
+
+In the previous example, we set `Kmax = 20`, `cv = 10` and `warm.start = NULL` to obtain the best model size via 10-fold CV without a warm-start strategy. We obtained `cvCTR.fit`, which is an object of class `CTR` containing all the relevant information of the fitted model. It also contains the fitted models of size $k = 1, 2, \ldots, 20$, the CV SSE values for each size model and the CV partition indices for further use. In this example, we increase `Kmax = 20` to `Kmax = 25` (although there is no indication that the larger model is better, we set `Kmax = 25` to illustrate `warm.start` option) and `cvCTR.fit` is given as input to the continuation of the `CTR`. Since CV does not run from scratch and the same CV partition indices are used for the continuation, CV SSEs for $k = 1, 2, \ldots, 20$ stay the same.
+```{r}
+#Fit CTR using CV with warm-start strategy
+cvCTR.fit.warmstart <- CTR(X, y, Kmax = 25, cv = 10, warm.start = cvCTR.fit)
+```
+
+```{r, fig.width = 8}
+#Plot relative errors with 25 derived predictors
+plot(cvCTR.fit.warmstart)
+```
+```{r, fig.width = 8}
+#Summarize the fitted CTR model
+summary(cvCTR.fit.warmstart)
+```
